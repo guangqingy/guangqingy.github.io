@@ -993,11 +993,6 @@ function renderConversionControls() {
     )
     .join("");
   if (comparison) dom.compareProductSelect.value = comparison.product.symbol;
-  $("#converterNoteText").textContent = !isPreciseMode()
-    ? "填个目标价看对应点位；右上角的钥匙可以解锁精准模式。"
-    : state.conversionMode === "leveraged-pair"
-      ? "先从填进去的那只还原出正股当天的涨跌，再映射到第二只；两边得是同一个收盘日。"
-      : "按同一天的收盘价和单日倍数估的值，不是基金净值，也不能当隔夜预测用。";
 }
 
 function renderProxyNotice() {
@@ -1064,7 +1059,7 @@ function updateDataStatus() {
     dom.dataPillText.textContent = "数据就绪";
     dom.heroStatusText.textContent = anchorDate ? `数据日期 ${anchorDate}` : "数据就绪";
     $("#sourceLine").textContent = "LeverPath 站内数据";
-    $("#timeLine").textContent = `数据日期 ${anchorDate || "—"} · 右上角钥匙解锁精准值`;
+    $("#timeLine").textContent = `数据日期 ${anchorDate || "—"}`;
     return;
   }
   dom.dataPillText.textContent = anchorDate ? `收盘 ${anchorDate}` : `${available ?? "—"} 只可算`;
@@ -2344,11 +2339,8 @@ function renderPublicKeyState() {
   if (dom.publicKeyForm) dom.publicKeyForm.hidden = unlocked;
   if (dom.publicKeyStatus) dom.publicKeyStatus.hidden = !unlocked;
   if (dom.publicKeyTrigger) {
-    dom.publicKeyTrigger.setAttribute(
-      "aria-label",
-      unlocked ? "精准模式已解锁" : "输入 key 解锁精准模式",
-    );
-    dom.publicKeyTrigger.title = unlocked ? "精准模式" : "输入 key";
+    dom.publicKeyTrigger.setAttribute("aria-label", unlocked ? "访问设置（已启用）" : "访问设置");
+    dom.publicKeyTrigger.removeAttribute("title");
   }
 }
 
