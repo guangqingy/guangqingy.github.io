@@ -2,40 +2,779 @@
 <html lang="zh-CN">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="robots" content="noindex" />
-    <meta
-      http-equiv="refresh"
-      content="0; url=https://leverpath-private.imotsuka.chatgpt.site/"
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'sha256-lmRzNHrqE4ehLSesYpsy2Z93DPVBCLZzfeR2PBXF+sY='; script-src-attr 'none'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://leverpath-private.imotsuka.chatgpt.site; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'" />
+    <meta name="referrer" content="no-referrer" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="description" content="LeverPath：输入正股或杠杆代码，进行价格推演和点位识别。" />
+    <meta name="theme-color" content="#f5f5f7" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="leverpath-api-origin" content="https://leverpath-private.imotsuka.chatgpt.site" />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="LeverPath · 正股与杠杆 ETF 价格换算" />
+    <meta property="og:description" content="正股与杠杆 ETF 的价格推演和点位识别。" />
+    <meta name="twitter:card" content="summary" />
+    <title>LeverPath · 正股与杠杆 ETF 价格换算</title>
+    <link
+      rel="icon"
+      href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 64 64%22><path d=%22M16 12v34a4 4 0 0 0 4 4h30%22 fill=%22none%22 stroke=%22%230071e3%22 stroke-width=%227%22 stroke-linecap=%22round%22/><circle cx=%2246%22 cy=%2218%22 r=%226%22 fill=%22%230071e3%22/></svg>"
     />
-    <link rel="canonical" href="https://leverpath-private.imotsuka.chatgpt.site/" />
-    <title>正在打开 LeverPath</title>
-    <style>
-      :root {
-        color-scheme: dark;
-        font-family:
-          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-        background: #080a0c;
-        color: #f4f5ef;
-      }
-      body {
-        min-height: 100vh;
-        margin: 0;
-        display: grid;
-        place-items: center;
-      }
-      a {
-        color: #d9ff63;
-      }
-    </style>
     <script>
-      const destination = new URL("https://leverpath-private.imotsuka.chatgpt.site/");
-      destination.search = window.location.search;
-      destination.hash = window.location.hash;
-      window.location.replace(destination.toString());
+      // Applied before first paint so the page never flashes the wrong appearance.
+      (function () {
+        try {
+          var choice = localStorage.getItem("leverpath.appearance");
+          if (choice === "light" || choice === "dark") {
+            document.documentElement.dataset.theme = choice;
+          }
+        } catch (error) {
+          /* private mode: fall back to the system preference */
+        }
+      })();
     </script>
+    <link rel="stylesheet" href="./assets/css/styles.css?v=20260830-1" />
+    <link rel="modulepreload" href="./assets/js/app.js?v=20260830-1" />
+    <link rel="modulepreload" href="./assets/js/calculator.js?v=20260829-1" />
+    <link rel="preload" as="fetch" href="./data/catalog.json" crossorigin />
   </head>
-  <body>
-    <p>正在打开 <a href="https://leverpath-private.imotsuka.chatgpt.site/">LeverPath</a>…</p>
+  <body data-precision="range">
+    <a class="skip-link" href="#symbolInput">跳到搜索框</a>
+
+    <aside class="public-key-panel" id="publicKeyPanel" aria-label="精准模式访问" hidden>
+      <button
+        class="public-key-trigger"
+        id="publicKeyTrigger"
+        type="button"
+        aria-label="输入 key 解锁精准模式"
+        aria-expanded="false"
+        aria-controls="publicKeyPopover"
+        title="输入 key"
+      >
+        <span class="public-key-glyph" aria-hidden="true"></span>
+        <span class="public-key-dot" aria-hidden="true"></span>
+      </button>
+      <div
+        class="public-key-popover"
+        id="publicKeyPopover"
+        role="dialog"
+        aria-label="精准模式"
+        hidden
+      >
+        <form id="publicKeyForm">
+          <label for="publicPrecisionKey">输入 key</label>
+          <div>
+            <input
+              id="publicPrecisionKey"
+              type="password"
+              placeholder="Key"
+              autocomplete="off"
+              spellcheck="false"
+              maxlength="128"
+            />
+            <button type="submit" id="publicKeySubmit">解锁</button>
+          </div>
+        </form>
+        <div class="public-key-status" id="publicKeyStatus" hidden>
+          <strong>精准模式</strong>
+          <span>精准数据已启用</span>
+          <button type="button" id="publicKeyLock">退出精准模式</button>
+        </div>
+        <p class="public-key-error" id="publicKeyError" role="alert" hidden></p>
+      </div>
+    </aside>
+
+    <header class="site-header">
+      <a class="brand" href="./" target="_top" aria-label="LeverPath 首页">
+        <span class="brand-mark" aria-hidden="true">
+          <span class="brand-line"></span>
+          <span class="brand-dot"></span>
+        </span>
+        <span class="brand-copy">
+          <strong>LeverPath</strong>
+        </span>
+      </a>
+      <div class="header-actions">
+        <button class="data-pill" id="dataPill" type="button" title="看看数据是什么时候的">
+          <span class="pulse-dot" aria-hidden="true"></span>
+          <span id="dataPillText">读取中</span>
+        </button>
+        <div class="theme-switch" id="themeSwitch" role="group" aria-label="外观">
+          <button
+            type="button"
+            data-appearance="light"
+            aria-pressed="false"
+            aria-label="浅色"
+            title="浅色"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="12" cy="12" r="4"></circle>
+              <path
+                d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6 7 7M17 17l1.4 1.4M18.4 5.6 17 7M7 17l-1.4 1.4"
+              ></path>
+            </svg>
+          </button>
+          <button
+            type="button"
+            data-appearance="dark"
+            aria-pressed="false"
+            aria-label="深色"
+            title="深色"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M20 14.2A8.2 8.2 0 0 1 9.8 4a8.2 8.2 0 1 0 10.2 10.2Z"></path>
+            </svg>
+          </button>
+          <button
+            type="button"
+            data-appearance="auto"
+            aria-pressed="true"
+            aria-label="跟随系统"
+            title="跟随系统"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="12" cy="12" r="8"></circle>
+              <path d="M12 4a8 8 0 0 1 0 16Z" fill="currentColor" stroke="none"></path>
+            </svg>
+          </button>
+        </div>
+        <button
+          class="icon-button"
+          id="openMethodButton"
+          type="button"
+          aria-label="怎么算的"
+          title="怎么算的"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="12" cy="12" r="9"></circle>
+            <path d="M12 10.8v5.4M12 7.7h.01"></path>
+          </svg>
+        </button>
+      </div>
+    </header>
+
+    <main id="main">
+      <section class="hero" id="hero">
+        <div class="hero-mast">
+          <h1 class="hero-title">正股到这个价，杠杆产品大概多少</h1>
+          <p class="hero-tagline">把正股和杠杆产品放进同一个换算口径，正着算、反着算都行。</p>
+        </div>
+
+        <form class="search-shell" id="symbolForm" novalidate>
+          <div class="search-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24">
+              <circle cx="10.8" cy="10.8" r="6.6"></circle>
+              <path d="m16 16 4.2 4.2"></path>
+            </svg>
+          </div>
+          <div class="search-field">
+            <label for="symbolInput">代码或名字</label>
+            <input
+              id="symbolInput"
+              name="symbol"
+              inputmode="text"
+              enterkeyhint="search"
+              autocomplete="off"
+              autocapitalize="none"
+              autocorrect="off"
+              spellcheck="false"
+              maxlength="16"
+              placeholder="比如 TSLA、TSLL、特斯拉"
+              role="combobox"
+              aria-haspopup="listbox"
+              aria-controls="searchSuggestions"
+              aria-autocomplete="list"
+              aria-expanded="false"
+            />
+          </div>
+          <span class="key-hint" id="searchKeyHint" aria-hidden="true">/</span>
+          <button
+            class="recognition-button"
+            id="openRecognitionButton"
+            type="button"
+            aria-label="从文字里识别代码和价格"
+            title="从一段文字里挑出代码和价格"
+          >
+            <span aria-hidden="true">识</span><span class="recognition-button-label">识别</span>
+          </button>
+          <button class="search-button" type="submit">
+            <span>换算</span>
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M5 12h14M14 7l5 5-5 5"></path>
+            </svg>
+          </button>
+          <div
+            class="suggestions"
+            id="searchSuggestions"
+            role="listbox"
+            aria-label="代码建议"
+            hidden
+          ></div>
+        </form>
+
+        <div class="hero-rails">
+          <div class="hero-rail" id="recentRail" hidden>
+            <span class="rail-label">最近看过</span>
+            <div class="rail-chips" id="recentChips"></div>
+            <button class="rail-clear" id="clearRecentButton" type="button">清除</button>
+          </div>
+          <div class="hero-rail" id="exampleRail">
+            <span class="rail-label">试试</span>
+            <div class="rail-chips" id="exampleChips"></div>
+          </div>
+        </div>
+
+        <p class="hero-status" id="heroStatus">
+          <span class="pulse-dot" aria-hidden="true"></span>
+          <span id="heroStatusText">正在读取收盘价…</span>
+        </p>
+      </section>
+
+      <section class="workspace" id="workspace" hidden>
+        <div class="workspace-head">
+          <div>
+            <div class="section-label">收盘价对照</div>
+            <div class="pair-title-row">
+              <h2 id="pairTitle">TSLA <span>↔</span> TSLL</h2>
+              <span class="factor-badge" id="factorBadge">+2×</span>
+            </div>
+            <p id="pairSubtitle">Tesla 与对应杠杆产品</p>
+          </div>
+          <div class="workspace-actions">
+            <button
+              class="soft-button"
+              id="newSearchButton"
+              type="button"
+              title="换个代码，按 / 也行"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <circle cx="10.8" cy="10.8" r="6.6"></circle>
+                <path d="m16 16 4.2 4.2"></path>
+              </svg>
+              换代码
+            </button>
+            <button
+              class="soft-button"
+              id="shareButton"
+              type="button"
+              title="复制带当前目标价的链接"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <circle cx="18" cy="5" r="2.5"></circle>
+                <circle cx="6" cy="12" r="2.5"></circle>
+                <circle cx="18" cy="19" r="2.5"></circle>
+                <path d="m8.2 10.8 7.6-4.5M8.2 13.2l7.6 4.5"></path>
+              </svg>
+              分享
+            </button>
+            <button
+              class="soft-button refresh-button"
+              id="refreshButton"
+              type="button"
+              title="重新拉一次数据"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M20 11a8 8 0 1 0-2.3 5.7M20 5v6h-6"></path>
+              </svg>
+              检查更新
+            </button>
+          </div>
+        </div>
+
+        <div class="product-tabs-wrap">
+          <span class="tabs-label">同组产品</span>
+          <div
+            class="product-tabs"
+            id="productTabs"
+            role="tablist"
+            aria-label="同一基准的杠杆产品"
+          ></div>
+        </div>
+
+        <div class="proxy-notice" id="proxyNotice" role="note" hidden>
+          <strong id="proxyNoticeTitle">用了代理基准</strong>
+          <span id="proxyNoticeText"></span>
+        </div>
+
+        <div class="quote-grid">
+          <button
+            class="quote-card quote-card-primary"
+            id="underlyingQuoteCard"
+            type="button"
+            aria-pressed="true"
+            title="点这边，从它开始算"
+          >
+            <div class="quote-topline">
+              <span class="quote-role">正股 / 基准</span>
+              <span class="session-badge">收盘价</span>
+            </div>
+            <div class="quote-symbol">
+              <strong id="underlyingSymbol">—</strong><span id="underlyingName">—</span>
+            </div>
+            <div class="quote-price"><span id="underlyingPrice">—</span><small>USD</small></div>
+            <div class="quote-change" id="underlyingChange">上一个收盘价</div>
+            <div class="quote-footer">
+              <span>收盘日</span><strong id="underlyingPrevious">—</strong>
+            </div>
+          </button>
+
+          <div class="map-bridge" aria-hidden="true">
+            <span></span>
+            <div>
+              <small>倍数</small>
+              <strong id="bridgeFactor">2×</strong>
+            </div>
+            <span></span>
+          </div>
+
+          <button
+            class="quote-card quote-card-leveraged"
+            id="leveragedQuoteCard"
+            type="button"
+            aria-pressed="false"
+            title="点这边，从它开始算"
+          >
+            <div class="quote-topline">
+              <span class="quote-role">杠杆产品</span>
+              <span class="session-badge">收盘价</span>
+            </div>
+            <div class="quote-symbol">
+              <strong id="leveragedSymbol">—</strong><span id="leveragedName">—</span>
+            </div>
+            <div class="quote-price"><span id="leveragedPrice">—</span><small>USD</small></div>
+            <div class="quote-change" id="leveragedChange">上一个收盘价</div>
+            <div class="quote-footer">
+              <span>收盘日</span><strong id="leveragedPrevious">—</strong>
+            </div>
+          </button>
+        </div>
+
+        <div class="engine-grid">
+          <article class="converter-panel" id="converterPanel">
+            <div class="panel-heading">
+              <div>
+                <h3>换算</h3>
+              </div>
+              <span class="chart-mode-label">换算结果</span>
+            </div>
+
+            <div class="converter-tools">
+              <div
+                class="mode-toggle"
+                id="conversionModeButtons"
+                role="group"
+                aria-label="换算模式"
+              >
+                <button
+                  class="active"
+                  type="button"
+                  data-conversion-mode="underlying"
+                  aria-pressed="true"
+                >
+                  正股 ↔ 杠杆
+                </button>
+                <button type="button" data-conversion-mode="leveraged-pair" aria-pressed="false">
+                  杠杆 ↔ 杠杆
+                </button>
+              </div>
+              <label class="compare-product-field" id="compareProductField" hidden>
+                <span>另一只杠杆</span>
+                <select id="compareProductSelect" aria-label="选择另一只杠杆产品"></select>
+              </label>
+            </div>
+
+            <div class="converter-body">
+              <div class="price-input-block">
+                <label for="targetPriceInput" id="targetPriceLabel">TSLA 目标价</label>
+                <div class="big-input">
+                  <span>$</span>
+                  <input
+                    id="targetPriceInput"
+                    inputmode="decimal"
+                    type="number"
+                    min="0.0001"
+                    step="any"
+                    aria-describedby="targetMove"
+                  />
+                </div>
+                <div class="move-readout" id="targetMove">较收盘 —</div>
+                <div class="nudge-row" id="nudgeRow" role="group" aria-label="相对收盘价快速调整">
+                  <button type="button" data-nudge="-5">−5%</button>
+                  <button type="button" data-nudge="-1">−1%</button>
+                  <button type="button" data-nudge="0" class="nudge-anchor">收盘价</button>
+                  <button type="button" data-nudge="1">+1%</button>
+                  <button type="button" data-nudge="5">+5%</button>
+                </div>
+              </div>
+
+              <div class="converter-arrow">
+                <span></span>
+                <button
+                  id="swapConversionButton"
+                  type="button"
+                  aria-label="换个方向算"
+                  title="换个方向算"
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M7 7h12m0 0-4-4m4 4-4 4M17 17H5m0 0 4 4m-4-4 4-4"></path>
+                  </svg>
+                </button>
+                <span></span>
+              </div>
+
+              <div class="price-output-block">
+                <span class="output-label" id="outputPriceLabel">TSLL 对应点位</span>
+                <div class="big-output"><span>$</span><strong id="convertedPrice">—</strong></div>
+                <div class="move-readout" id="convertedMove">较收盘 —</div>
+                <p class="sr-only" id="conversionLive" role="status" aria-live="polite"></p>
+                <button class="ghost-button" id="copyResultButton" type="button">
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <rect x="9" y="9" width="11" height="11" rx="2.5"></rect>
+                    <path d="M15 5.5H6A1.5 1.5 0 0 0 4.5 7v9"></path>
+                  </svg>
+                  复制结果
+                </button>
+              </div>
+            </div>
+
+            <div class="converter-note">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M12 3 2.8 19h18.4L12 3Z"></path>
+                <path d="M12 9v4.5M12 16.5h.01"></path>
+              </svg>
+              <span id="converterNoteText"
+                >按同一天的收盘价和单日倍数估的值，不是基金净值，也不能当隔夜预测用。</span
+              >
+            </div>
+          </article>
+
+          <aside class="diagnostic-panel">
+            <h3>这次用的基准</h3>
+            <div class="anchor-equation">
+              <span id="anchorUnderlying">—</span>
+              <small>正股收盘</small>
+              <strong id="anchorFactor">× 2</strong>
+              <span id="anchorLeveraged">—</span>
+              <small>杠杆收盘</small>
+            </div>
+            <div class="diagnostic-list">
+              <div>
+                <span>收盘日</span>
+                <strong id="anchorDate">—</strong>
+              </div>
+              <div>
+                <span>数据生成</span>
+                <strong id="snapshotTime">—</strong>
+              </div>
+              <div>
+                <span>目录核对</span>
+                <strong id="catalogVerified">—</strong>
+              </div>
+            </div>
+            <p class="diagnostic-caption" id="diagnosticCaption">
+              两边必须是同一天的收盘价。缺一边就不出数字。
+            </p>
+          </aside>
+        </div>
+
+        <section class="path-panel" id="pathPanel" aria-labelledby="pathTitle">
+          <div class="path-head">
+            <div>
+              <h3 id="pathTitle">同样的涨跌，走几天不一样</h3>
+            </div>
+            <div class="path-days" id="pathDays" role="group" aria-label="假设的持有天数">
+              <button type="button" data-days="3" aria-pressed="false">3 天</button>
+              <button type="button" data-days="5" class="active" aria-pressed="true">5 天</button>
+              <button type="button" data-days="10" aria-pressed="false">10 天</button>
+              <button type="button" data-days="20" aria-pressed="false">20 天</button>
+            </div>
+          </div>
+          <p class="path-lead" id="pathLead">填个目标价，这里会算出一天走完和分几天走完的差别。</p>
+          <div class="path-rows" id="pathRows" role="status" aria-live="polite" aria-atomic="true">
+            <div class="path-status">
+              <strong>还没填目标价</strong>
+              <span>填完这里会自动算</span>
+            </div>
+          </div>
+          <p class="path-note">
+            一路单边走，每天的复利帮忙；来回震荡，损耗就出来了。这些都不是预测，只是把<strong>同一段涨跌</strong>换个走法重算一遍——杠杆
+            ETF 只承诺单日倍数，原因就在这里。
+          </p>
+        </section>
+
+        <div class="analysis-grid">
+          <article class="chart-panel">
+            <div class="panel-heading compact">
+              <div>
+                <h3>价格对照曲线</h3>
+              </div>
+              <span class="chart-mode-label">换算结果</span>
+            </div>
+            <div class="chart-wrap">
+              <svg
+                id="mappingChart"
+                role="img"
+                aria-labelledby="chartTitle chartDescription"
+                viewBox="0 0 720 300"
+              >
+                <title id="chartTitle">正股与杠杆 ETF 的价格对照</title>
+                <desc id="chartDescription">
+                  一组输入价格和它们各自对应的换算结果，并标出收盘价和当前目标价。
+                </desc>
+                <defs>
+                  <linearGradient id="chartGradient" x1="0" x2="0" y1="0" y2="1">
+                    <stop offset="0" stop-color="#0071e3" stop-opacity="0.55"></stop>
+                    <stop offset="1" stop-color="#0071e3" stop-opacity="0"></stop>
+                  </linearGradient>
+                </defs>
+                <g id="chartGrid"></g>
+                <path id="chartArea" class="chart-area"></path>
+                <path id="chartLine" class="chart-line"></path>
+                <g id="chartMarkers"></g>
+                <g id="chartPoints"></g>
+                <g id="chartLabels"></g>
+              </svg>
+              <div class="chart-tooltip" id="chartTooltip" hidden></div>
+            </div>
+            <div class="chart-legend">
+              <span class="legend-item legend-anchor">收盘价</span>
+              <span class="legend-item legend-target">当前目标价</span>
+              <span class="legend-axis" id="chartAxisNote"
+                >横轴：填进去的价 · 纵轴：算出来的价</span
+              >
+            </div>
+          </article>
+
+          <article class="ladder-panel">
+            <div class="panel-heading compact ladder-heading">
+              <div>
+                <h3>价格对照表</h3>
+              </div>
+              <div class="ladder-controls">
+                <div class="range-buttons" id="rangeButtons" role="group" aria-label="价格跨度">
+                  <button type="button" data-range="5" aria-pressed="false">±5%</button>
+                  <button type="button" data-range="10" class="active" aria-pressed="true">
+                    ±10%
+                  </button>
+                  <button type="button" data-range="20" aria-pressed="false">±20%</button>
+                </div>
+                <label class="step-select"
+                  ><span>步长</span>
+                  <select id="stepSelect">
+                    <option value="0.5">0.5%</option>
+                    <option value="1">1%</option>
+                    <option value="2" selected>2%</option>
+                    <option value="5">5%</option>
+                  </select>
+                </label>
+              </div>
+            </div>
+            <div class="table-wrap" id="ladderWrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th id="driverColumn">正股价格</th>
+                    <th id="driverMoveColumn">较收盘</th>
+                    <th id="mappedColumn">杠杆价格</th>
+                    <th id="mappedMoveColumn">较收盘</th>
+                  </tr>
+                </thead>
+                <tbody id="ladderBody"></tbody>
+              </table>
+            </div>
+            <div class="ladder-footnote">
+              <span class="legend-item legend-anchor">收盘价那行</span>
+              <span class="legend-item legend-target">最接近目标价</span>
+            </div>
+          </article>
+        </div>
+
+        <div class="data-footnote">
+          <div>
+            <span class="pulse-dot" aria-hidden="true"></span>
+            <p>
+              <strong id="sourceLine">Yahoo Finance 每日收盘数据</strong><br /><span id="timeLine"
+                >正在读取时间</span
+              >
+            </p>
+          </div>
+          <p>
+            普通模式下的数字是演示值，不是真实报价。这里只做价格推演，不构成投资建议。杠杆产品是按单日倍数设计的，拿过夜就会受复利、波动、费用、溢折价和跟踪误差影响。
+          </p>
+        </div>
+      </section>
+
+      <section class="error-state" id="errorState" hidden>
+        <h2 id="errorTitle">这组算不出来</h2>
+        <p id="errorMessage">检查一下代码，或者换一个收录过的产品。</p>
+        <div class="error-suggestions" id="errorSuggestions" hidden>
+          <span class="rail-label" id="errorSuggestionLabel">你是不是想找</span>
+          <div class="rail-chips" id="errorSuggestionChips"></div>
+        </div>
+        <div class="error-actions">
+          <button class="primary-button" id="backToCatalogButton" type="button">重新输入</button>
+        </div>
+      </section>
+    </main>
+
+    <noscript>
+      <div class="noscript-note">
+        LeverPath 需要 JavaScript 才能读取数据并换算，请在浏览器里打开。
+      </div>
+    </noscript>
+
+    <dialog class="modal recognition-modal" id="recognitionDialog">
+      <div class="modal-card recognition-card">
+        <button class="modal-close" aria-label="关闭" type="button" data-close-recognition>
+          ×
+        </button>
+        <div class="recognition-dialog-header">
+          <span class="recognition-dialog-icon" aria-hidden="true">识</span>
+          <div>
+            <h2>从一段文字里挑出代码和价格</h2>
+            <p>
+              粘贴一段话，自动找出里面的代码和价格，再一次算出对应的杠杆点位。文字只在你自己的浏览器里解析，不上传也不保存。
+            </p>
+          </div>
+        </div>
+        <label class="recognition-text-field">
+          <span class="recognition-field-heading"
+            ><strong>粘贴文字</strong><small>目标价、支撑位、价格区间、max pain 都能认</small></span
+          >
+          <textarea
+            id="recognitionText"
+            rows="10"
+            placeholder="把包含 QQQ、SOXX、英伟达 之类代码和价格的文字贴进来…"
+          ></textarea>
+        </label>
+        <label class="recognition-alias-field">
+          <span class="recognition-field-heading"
+            ><strong>自己的叫法</strong><small>可选，比内置词典优先</small></span
+          >
+          <input
+            id="recognitionAliases"
+            type="text"
+            autocomplete="off"
+            placeholder="例如：迪子=SNDK，老李=NVDA"
+          />
+          <small>用逗号分隔，只存在这台设备上。英伟达、纳指、台积电这类常见叫法已经内置。</small>
+        </label>
+        <div class="recognition-actions">
+          <button
+            class="primary-button recognition-run-button"
+            id="runRecognitionButton"
+            type="button"
+            disabled
+          >
+            <span class="recognition-run-icon" aria-hidden="true">识</span>
+            <span class="recognition-run-copy"
+              ><strong>识别</strong><small>提出代码，算出对应点位</small></span
+            >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M5 12h14M14 7l5 5-5 5"></path>
+            </svg>
+          </button>
+          <div class="recognition-side">
+            <button class="ghost-button" id="recognitionSampleButton" type="button">
+              填个示例
+            </button>
+            <span class="recognition-summary" id="recognitionSummary" role="status"
+              >正在读取收盘价</span
+            >
+          </div>
+        </div>
+        <div class="recognition-results" id="recognitionResults" hidden>
+          <div class="recognition-result-menu">
+            <label>
+              <span>选择正股</span>
+              <select id="recognitionSymbolSelect" aria-label="选择识别到的正股"></select>
+            </label>
+            <div class="recognition-result-tools">
+              <span id="recognitionGroupMeta">—</span>
+              <button class="ghost-button" id="recognitionOpenButton" type="button">
+                在主界面打开
+              </button>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table class="recognition-matrix">
+              <thead id="recognitionHead"></thead>
+              <tbody id="recognitionBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </dialog>
+
+    <dialog class="modal" id="methodDialog">
+      <div class="modal-card method-card">
+        <button class="modal-close" aria-label="关闭" type="button" data-close-method>×</button>
+        <h2>怎么算的</h2>
+        <div class="method-block">
+          <span>01</span>
+          <div>
+            <h3>两边取同一天的收盘价</h3>
+            <p>解锁精准模式后，正股和杠杆产品都取最近一个共同交易日的常规时段收盘价。</p>
+          </div>
+        </div>
+        <div class="formula">
+          <i>L</i><sub>target</sub> = <i>L</i><sub>0</sub> × [1 + β × (<i>S</i><sub>target</sub> /
+          <i>S</i><sub>0</sub> − 1)]
+        </div>
+        <div class="method-block">
+          <span>02</span>
+          <div>
+            <h3>正反都能算</h3>
+            <p>填正股价格得到杠杆价格；填杠杆价格，就用同一个式子反推回正股。</p>
+          </div>
+        </div>
+        <div class="method-block">
+          <span>03</span>
+          <div>
+            <h3>两只杠杆之间</h3>
+            <p>
+              先用第一只相对收盘价的变化和它的倍数，还原出正股当天的涨跌，再映射到同一基准下的第二只。
+            </p>
+          </div>
+        </div>
+        <div class="method-block warning-block">
+          <span>!</span>
+          <div>
+            <h3>别拿它预测明天</h3>
+            <p>
+              每日重置、复利、波动、费用和跟踪误差都会让实际成交价偏离这里的理论值；用代理基准的产品误差更大。
+            </p>
+          </div>
+        </div>
+      </div>
+    </dialog>
+
+    <dialog class="modal" id="statusDialog">
+      <div class="modal-card status-card">
+        <button class="modal-close" aria-label="关闭" type="button" data-close-status>×</button>
+        <h2>数据状态</h2>
+        <div class="status-list" id="statusList"></div>
+        <p class="status-note" id="statusNote">
+          数据在每个美股交易日收盘后更新一次。收盘日对不上或者缺报价的产品还能搜到，但不会给数字。
+        </p>
+        <p class="status-note">
+          LeverPath 应用代码不采集也不保存 IP、位置、邮箱、访问路径和你输入的 key。页面通过 GitHub
+          Pages 托管时，GitHub 可能为平台安全处理访问日志。
+        </p>
+      </div>
+    </dialog>
+
+    <div
+      class="loading-layer"
+      id="loadingLayer"
+      aria-live="assertive"
+      aria-label="正在读取行情数据"
+      hidden
+    >
+      <div class="loader-mark"><span></span><i></i></div>
+      <p>正在读取收盘价…</p>
+    </div>
+    <div class="toast" id="toast" role="status" hidden></div>
+
+    <script type="module" src="./assets/js/app.js?v=20260830-1"></script>
   </body>
 </html>
