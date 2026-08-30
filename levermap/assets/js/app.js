@@ -1087,13 +1087,6 @@ function sampleAnchorDate() {
 function renderStatusDialog() {
   const catalog = state.marketSnapshot?.catalog || {};
   const rows = [
-    ["访问模式", isPreciseMode() ? "精准模式" : "普通模式"],
-    [
-      "数据状态",
-      state.marketSnapshot?.status === "partial"
-        ? "部分产品降级"
-        : state.marketSnapshot?.status || "—",
-    ],
     ["数据生成", formatDateTime(state.marketSnapshot?.generated_at)],
     ["收盘日", state.active?.anchorDate || sampleAnchorDate() || "—"],
     ["可以计算", `${catalog.available_product_count ?? "—"} / ${catalog.product_count ?? "—"}`],
