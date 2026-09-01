@@ -32,55 +32,13 @@
         }
       })();
     </script>
-    <link rel="stylesheet" href="./assets/css/styles.css?v=20260830-2" />
-    <link rel="modulepreload" href="./assets/js/app.js?v=20260830-3" />
+    <link rel="stylesheet" href="./assets/css/styles.css?v=20260831-1" />
+    <link rel="modulepreload" href="./assets/js/app.js?v=20260831-1" />
     <link rel="modulepreload" href="./assets/js/calculator.js?v=20260829-1" />
     <link rel="preload" as="fetch" href="./data/catalog.json" crossorigin />
   </head>
-  <body data-precision="range">
+  <body>
     <a class="skip-link" href="#symbolInput">跳到搜索框</a>
-
-    <aside class="public-key-panel" id="publicKeyPanel" aria-label="访问设置" hidden>
-      <button
-        class="public-key-trigger"
-        id="publicKeyTrigger"
-        type="button"
-        aria-label="访问设置"
-        aria-expanded="false"
-        aria-controls="publicKeyPopover"
-      >
-        <span class="public-key-glyph" aria-hidden="true"></span>
-        <span class="public-key-dot" aria-hidden="true"></span>
-      </button>
-      <div
-        class="public-key-popover"
-        id="publicKeyPopover"
-        role="dialog"
-        aria-label="精准模式"
-        hidden
-      >
-        <form id="publicKeyForm">
-          <label for="publicPrecisionKey">输入 key</label>
-          <div>
-            <input
-              id="publicPrecisionKey"
-              type="password"
-              placeholder="Key"
-              autocomplete="off"
-              spellcheck="false"
-              maxlength="128"
-            />
-            <button type="submit" id="publicKeySubmit">解锁</button>
-          </div>
-        </form>
-        <div class="public-key-status" id="publicKeyStatus" hidden>
-          <strong>精准模式</strong>
-          <span>精准数据已启用</span>
-          <button type="button" id="publicKeyLock">退出精准模式</button>
-        </div>
-        <p class="public-key-error" id="publicKeyError" role="alert" hidden></p>
-      </div>
-    </aside>
 
     <header class="site-header">
       <a class="brand" href="./" target="_top" aria-label="LeverPath 首页">
@@ -587,7 +545,7 @@
             </p>
           </div>
           <p>
-            普通模式下的数字是演示值，不是真实报价。这里只做价格推演，不构成投资建议。杠杆产品是按单日倍数设计的，拿过夜就会受复利、波动、费用、溢折价和跟踪误差影响。
+            页面数字基于每日常规时段收盘价做理论推演，不是实时或可执行报价，也不构成投资建议。杠杆产品是按单日倍数设计的，拿过夜就会受复利、波动、费用、溢折价和跟踪误差影响。
           </p>
         </div>
       </section>
@@ -746,8 +704,8 @@
           数据在每个美股交易日收盘后更新一次。收盘日对不上或者缺报价的产品还能搜到，但不会给数字。
         </p>
         <p class="status-note">
-          LeverPath 应用代码不采集也不保存 IP、位置、邮箱、访问路径和你输入的 key。页面通过 GitHub
-          Pages 托管时，GitHub 可能为平台安全处理访问日志。
+          LeverPath 应用代码不采集也不保存 IP、位置、邮箱和访问路径。页面通过 GitHub Pages
+          托管时，GitHub 可能为平台安全处理访问日志。
         </p>
       </div>
     </dialog>
@@ -764,6 +722,6 @@
     </div>
     <div class="toast" id="toast" role="status" hidden></div>
 
-    <script type="module" src="./assets/js/app.js?v=20260830-3"></script>
+    <script type="module" src="./assets/js/app.js?v=20260831-1"></script>
   </body>
 </html>
