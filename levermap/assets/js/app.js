@@ -40,7 +40,11 @@ const API_ORIGIN = new URL(
   $("meta[name='leverpath-api-origin']")?.content || window.location.origin,
   window.location.origin,
 ).origin;
+const USES_REMOTE_API = API_ORIGIN !== window.location.origin;
 const SNAPSHOT_URL = new URL("/api/market-snapshot", API_ORIGIN);
+const REFERENCE_OUTPUT_URL = new URL("/api/reference-output", API_ORIGIN);
+const KEY_URL = new URL("/api/key", API_ORIGIN);
+const PRECISION_SESSION_KEY = "leverpath.precision.session";
 const DEFAULT_RECOGNITION_ALIASES = "迪子=SNDK";
 const RECOGNITION_ALIAS_KEY = "leverpath.recognition.aliases";
 const EXAMPLE_CANDIDATES = ["TSLA", "NVDA", "QQQ", "MSTR", "SOXX", "台积电"];
@@ -59,6 +63,35 @@ const PREFERRED_PRODUCTS = {
   MSTR: "MSTU",
 };
 
+function readPrecisionToken() {
+  if (!USES_REMOTE_API) return null;
+  try {
+    return window.sessionStorage.getItem(PRECISION_SESSION_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function savePrecisionToken(token) {
+  if (!USES_REMOTE_API) return;
+  state.precisionToken = token;
+  try {
+    window.sessionStorage.setItem(PRECISION_SESSION_KEY, token);
+  } catch {
+    /* private mode: keep the short-lived token in memory for this page */
+  }
+}
+
+function clearPrecisionToken() {
+  state.precisionToken = null;
+  try {
+    window.sessionStorage.removeItem(PRECISION_SESSION_KEY);
+  } catch {
+    /* private mode: the in-memory token is already gone */
+  }
+  renderPublicKeyState();
+}
+
 const state = {
   groups: [],
   indexes: { underlyings: new Map(), products: new Map() },
@@ -66,6 +99,15 @@ const state = {
   zhNames: new Map(),
   allSymbols: [],
   marketSnapshot: null,
+  precisionToken: readPrecisionToken(),
+  precisionMode: "range",
+  referenceWorkspace: null,
+  referenceWorkspaceKey: null,
+  referenceCache: new Map(),
+  referenceTimer: null,
+  referenceAbortController: null,
+  referenceRequestId: 0,
+  recognitionRequestId: 0,
   active: null,
   driverRole: "underlying",
   conversionMode: "underlying",
@@ -102,6 +144,15 @@ const dom = {
   toast: $("#toast"),
   dataPill: $("#dataPill"),
   dataPillText: $("#dataPillText"),
+  publicKeyPanel: $("#publicKeyPanel"),
+  publicKeyTrigger: $("#publicKeyTrigger"),
+  publicKeyPopover: $("#publicKeyPopover"),
+  publicKeyForm: $("#publicKeyForm"),
+  publicPrecisionKey: $("#publicPrecisionKey"),
+  publicKeySubmit: $("#publicKeySubmit"),
+  publicKeyStatus: $("#publicKeyStatus"),
+  publicKeyLock: $("#publicKeyLock"),
+  publicKeyError: $("#publicKeyError"),
   refreshButton: $("#refreshButton"),
   shareButton: $("#shareButton"),
   newSearchButton: $("#newSearchButton"),
@@ -160,6 +211,23 @@ function normalizeSymbol(value) {
 function finitePositive(value) {
   const number = Number(value);
   return Number.isFinite(number) && number > 0 ? number : null;
+}
+
+function isPreciseMode() {
+  return state.precisionMode === "precise";
+}
+
+function applySnapshotMode(snapshot) {
+  state.precisionMode = snapshot?.precision_mode === "precise" ? "precise" : "range";
+  window.clearTimeout(state.referenceTimer);
+  state.referenceAbortController?.abort();
+  state.referenceWorkspace = null;
+  state.referenceWorkspaceKey = null;
+  state.referenceCache.clear();
+  state.referenceRequestId += 1;
+  state.recognitionRequestId += 1;
+  document.body.dataset.precision = state.precisionMode;
+  renderPublicKeyState();
 }
 
 function factorLabel(value) {
@@ -256,12 +324,26 @@ async function fetchJson(url, { bustCache = false, timeoutMs = 12000 } = {}) {
   const controller = new AbortController();
   const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
   try {
+    const headers = new Headers({ Accept: "application/json" });
+    const sendsPrecisionToken =
+      USES_REMOTE_API &&
+      Boolean(state.precisionToken) &&
+      requestUrl.origin === API_ORIGIN &&
+      requestUrl.pathname === SNAPSHOT_URL.pathname;
+    if (sendsPrecisionToken) {
+      headers.set("Authorization", `Bearer ${state.precisionToken}`);
+    }
     const requestInit = {
-      headers: { Accept: "application/json" },
+      headers,
       cache: bustCache ? "no-store" : "default",
       signal: controller.signal,
     };
-    const response = await fetch(requestUrl, requestInit);
+    let response = await fetch(requestUrl, requestInit);
+    if (response.status === 401 && sendsPrecisionToken) {
+      clearPrecisionToken();
+      headers.delete("Authorization");
+      response = await fetch(requestUrl, requestInit);
+    }
     if (!response.ok) throw new Error(`数据没读到（${response.status}）`);
     return await response.json();
   } catch (error) {
@@ -269,6 +351,105 @@ async function fetchJson(url, { bustCache = false, timeoutMs = 12000 } = {}) {
     throw error;
   } finally {
     window.clearTimeout(timeout);
+  }
+}
+
+async function postReferenceJson(body, { signal } = {}) {
+  const response = await fetch(REFERENCE_OUTPUT_URL, {
+    method: "POST",
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    cache: "no-store",
+    body: JSON.stringify({ ...body, token: state.marketSnapshot?.reference_token }),
+    signal,
+  });
+  if (!response.ok) throw new Error(`结果没算出来（${response.status}）`);
+  const payload = await response.json();
+  if (!payload?.ok) throw new Error("结果没算出来");
+  return payload.result;
+}
+
+function referenceWorkspaceContext() {
+  const context = conversionContext();
+  const target = finitePositive(dom.targetPriceInput.value);
+  if (!state.active || !context || target == null) return null;
+  return {
+    underlyingSymbol: state.active.underlying.symbol,
+    primaryProductSymbol: state.active.product.symbol,
+    comparisonProductSymbol:
+      context.mode === "leveraged-pair"
+        ? ensureComparisonSelection()?.product.symbol || null
+        : null,
+    inputSymbol: context.input.symbol,
+    outputSymbol: context.output.symbol,
+    target,
+    range: state.range,
+    step: state.step,
+    pathDays: state.pathDays,
+  };
+}
+
+function referenceContextKey(context = referenceWorkspaceContext()) {
+  return context ? JSON.stringify(context) : null;
+}
+
+function queueReferenceWorkspace(delay = 120) {
+  if (isPreciseMode()) return;
+  const context = referenceWorkspaceContext();
+  const key = referenceContextKey(context);
+  window.clearTimeout(state.referenceTimer);
+  state.referenceAbortController?.abort();
+  state.referenceWorkspace = null;
+  state.referenceWorkspaceKey = null;
+  if (!context || !key || !state.marketSnapshot?.reference_token) {
+    renderReferenceFailure("价格要大于 0");
+    return;
+  }
+  const cached = state.referenceCache.get(key);
+  if (cached) {
+    state.referenceWorkspace = cached;
+    state.referenceWorkspaceKey = key;
+    renderReferenceWorkspace(cached);
+    return;
+  }
+  state.referenceTimer = window.setTimeout(() => requestReferenceWorkspace(context, key), delay);
+}
+
+async function requestReferenceWorkspace(context, key) {
+  const requestId = ++state.referenceRequestId;
+  const controller = new AbortController();
+  state.referenceAbortController = controller;
+  const timeout = window.setTimeout(() => controller.abort(), 12_000);
+  try {
+    const result = await postReferenceJson(
+      { operation: "workspace", context },
+      { signal: controller.signal },
+    );
+    if (
+      requestId !== state.referenceRequestId ||
+      isPreciseMode() ||
+      key !== referenceContextKey()
+    ) {
+      return;
+    }
+    if (state.referenceCache.size >= 96) {
+      state.referenceCache.delete(state.referenceCache.keys().next().value);
+    }
+    state.referenceCache.set(key, result);
+    state.referenceWorkspace = result;
+    state.referenceWorkspaceKey = key;
+    renderReferenceWorkspace(result);
+  } catch (error) {
+    if (
+      error?.name !== "AbortError" &&
+      requestId === state.referenceRequestId &&
+      !isPreciseMode() &&
+      key === referenceContextKey()
+    ) {
+      renderReferenceFailure("暂时算不出来");
+    }
+  } finally {
+    window.clearTimeout(timeout);
+    if (state.referenceAbortController === controller) state.referenceAbortController = null;
   }
 }
 
@@ -281,6 +462,21 @@ function snapshotQuotes() {
 
 function pairFor(underlyingSymbol, productSymbol) {
   const quotes = snapshotQuotes();
+  if (!isPreciseMode()) {
+    const syntheticAnchor = (quote) =>
+      quote
+        ? {
+            close: quote.reference_value,
+            previous_close: quote.reference_previous_value,
+            session_date: quote.session_date,
+          }
+        : null;
+    return validatePairAnchors(
+      syntheticAnchor(quotes[underlyingSymbol]),
+      syntheticAnchor(quotes[productSymbol]),
+      state.marketSnapshot?.anchor_date,
+    );
+  }
   return validatePairAnchors(
     quotes[underlyingSymbol],
     quotes[productSymbol],
@@ -726,16 +922,18 @@ function renderQuote(role, symbol, name, anchor) {
   $(`#${role}Price`).textContent = formatPriceBare(anchor.value);
   $(`#${role}Previous`).textContent = anchor.date || "—";
   const card = $(`#${role}QuoteCard`);
-  card.querySelector(".session-badge").textContent = "收盘价";
+  card.querySelector(".session-badge").textContent = isPreciseMode() ? "收盘价" : "参考价";
   const sessionMove = anchorSessionMove(anchor);
   const changeNode = $(`#${role}Change`);
   if (sessionMove == null) {
-    setMovement(changeNode, null, "上一个常规收盘");
+    setMovement(changeNode, null, isPreciseMode() ? "上一个常规收盘" : "没有前一个收盘价");
   } else {
     setMovement(
       changeNode,
       sessionMove,
-      `当日 ${formatPercent(sessionMove)} · 前收 ${formatPriceBare(anchor.previousClose)}`,
+      isPreciseMode()
+        ? `当日 ${formatPercent(sessionMove)} · 前收 ${formatPriceBare(anchor.previousClose)}`
+        : `变动 ${formatPercent(sessionMove)} · 前值 ${formatPriceBare(anchor.previousClose)}`,
     );
   }
 }
@@ -829,9 +1027,11 @@ function renderDiagnostics() {
   $("#snapshotTime").textContent = formatDateTime(state.marketSnapshot?.generated_at);
   $("#catalogVerified").textContent = product.verified_at || "—";
   const anchorLabels = $$(".anchor-equation small");
-  if (anchorLabels[0]) anchorLabels[0].textContent = "正股收盘";
-  if (anchorLabels[1]) anchorLabels[1].textContent = "杠杆收盘";
-  $("#diagnosticCaption").textContent = "两边必须是同一天的收盘价。缺一边就不出数字。";
+  if (anchorLabels[0]) anchorLabels[0].textContent = isPreciseMode() ? "正股收盘" : "正股基准";
+  if (anchorLabels[1]) anchorLabels[1].textContent = isPreciseMode() ? "杠杆收盘" : "杠杆基准";
+  $("#diagnosticCaption").textContent = isPreciseMode()
+    ? "两边必须是同一天的收盘价。缺一边就不出数字。"
+    : "两边用的是同一天的数据。";
 }
 
 function snapshotAgeHours() {
@@ -855,6 +1055,13 @@ function updateDataStatus() {
   const available = catalog.available_product_count;
   const total = catalog.product_count;
   const anchorDate = sampleAnchorDate() || state.active?.anchorDate;
+  if (!isPreciseMode()) {
+    dom.dataPillText.textContent = "数据就绪";
+    dom.heroStatusText.textContent = anchorDate ? `数据日期 ${anchorDate}` : "数据就绪";
+    $("#sourceLine").textContent = "LeverPath 站内数据";
+    $("#timeLine").textContent = `数据日期 ${anchorDate || "—"}`;
+    return;
+  }
   dom.dataPillText.textContent = anchorDate ? `收盘 ${anchorDate}` : `${available ?? "—"} 只可算`;
   dom.heroStatusText.textContent = anchorDate
     ? `收盘 ${anchorDate} · 可算 ${available ?? "—"} 只 / 可搜 ${total ?? "—"} 只`
@@ -885,7 +1092,10 @@ function renderStatusDialog() {
     ["可以计算", `${catalog.available_product_count ?? "—"} / ${catalog.product_count ?? "—"}`],
     ["没有收盘价", `${catalog.unavailable_product_count ?? "—"} 只（收盘日对不上或缺报价）`],
     ["只能搜索", `${catalog.reference_only_product_count ?? "—"} 只（24 小时交易的加密参考）`],
-    ["数据来源", state.marketSnapshot?.provider?.name || "Yahoo Finance"],
+    [
+      "数据来源",
+      isPreciseMode() ? state.marketSnapshot?.provider?.name || "Yahoo Finance" : "站内数据",
+    ],
   ];
   dom.statusList.innerHTML = rows
     .map(
@@ -908,12 +1118,13 @@ function updateDriverUi() {
   $("#chartAxisNote").textContent = `横轴 ${context.input.symbol} · 纵轴 ${context.output.symbol}`;
   dom.nudgeRow.hidden = false;
   const modeLabels = $$(".chart-mode-label");
-  if (modeLabels[0]) modeLabels[0].textContent = "按收盘价的理论值";
-  if (modeLabels[1]) modeLabels[1].textContent = "理论值";
-  $("#chartDescription").textContent =
-    "在设定的跨度里，填进去的价格和算出来的价格之间的理论关系，并标出收盘价和当前目标价。";
+  if (modeLabels[0]) modeLabels[0].textContent = isPreciseMode() ? "按收盘价的理论值" : "换算结果";
+  if (modeLabels[1]) modeLabels[1].textContent = isPreciseMode() ? "理论值" : "价格对照";
+  $("#chartDescription").textContent = isPreciseMode()
+    ? "在设定的跨度里，填进去的价格和算出来的价格之间的理论关系，并标出收盘价和当前目标价。"
+    : "一组输入价格和它们各自对应的结果，并标出基准价和当前目标价。";
   $$(".legend-anchor").forEach((label) => {
-    label.textContent = "收盘价";
+    label.textContent = isPreciseMode() ? "收盘价" : "基准价";
   });
   const underlyingIsDriver = context.mode === "underlying" && state.driverRole === "underlying";
   const primaryIsDriver =
@@ -953,6 +1164,10 @@ function calculateTarget(value) {
   });
 }
 
+function currentReferenceWorkspace() {
+  return state.referenceWorkspaceKey === referenceContextKey() ? state.referenceWorkspace : null;
+}
+
 function renderPathStatus(message, detail = "改一下目标价会自动更新") {
   dom.pathPanel.hidden = false;
   dom.pathLead.textContent = message;
@@ -962,11 +1177,63 @@ function renderPathStatus(message, detail = "改一下目标价会自动更新")
   </div>`;
 }
 
+function renderReferenceFailure(message) {
+  if (isPreciseMode()) return;
+  $("#convertedPrice").textContent = "—";
+  setMovement($("#convertedMove"), null, message);
+  dom.copyResultButton.disabled = true;
+  dom.conversionLive.textContent = message;
+  $("#ladderBody").innerHTML = "";
+  renderChart([], null);
+  renderPathStatus(message, "改一下目标价再试");
+}
+
+function renderReferenceWorkspace(result) {
+  if (isPreciseMode() || !result) return;
+  const context = conversionContext();
+  const inputValue = finitePositive(dom.targetPriceInput.value);
+  if (!context || inputValue == null) return;
+  const convertedPrice = finitePositive(result.conversionPrice);
+  const convertedMove = Number(result.conversionMove);
+  if (convertedPrice == null || !Number.isFinite(convertedMove)) {
+    renderReferenceFailure("暂时算不出来");
+    return;
+  }
+  $("#convertedPrice").textContent = formatPriceBare(convertedPrice);
+  setMovement($("#convertedMove"), convertedMove, `对应变动 ${formatPercent(convertedMove)}`);
+  setMovement($("#targetMove"), result.inputMove, `较基准 ${formatPercent(result.inputMove)}`);
+  dom.copyResultButton.disabled = false;
+  dom.conversionLive.textContent = `${context.input.symbol} ${formatPriceBare(inputValue)} 对应 ${context.output.symbol} ${formatPriceBare(convertedPrice)}，对应变动 ${formatPercent(convertedMove)}`;
+  renderLadderAndChart();
+  renderPathPanel();
+}
+
 function updateConversionOutputs() {
   if (!state.active) return;
   const context = conversionContext();
   if (!context) return;
   const inputValue = finitePositive(dom.targetPriceInput.value);
+  if (!isPreciseMode()) {
+    const inputMove = inputValue ? percentMove(inputValue, context.input.anchor) : null;
+    setMovement(
+      $("#targetMove"),
+      inputMove,
+      inputMove == null ? "价格要大于 0" : `较基准 ${formatPercent(inputMove)}`,
+    );
+    if (inputValue == null) {
+      renderReferenceFailure("价格要大于 0");
+    } else {
+      $("#convertedPrice").textContent = "—";
+      setMovement($("#convertedMove"), null, "正在算");
+      dom.copyResultButton.disabled = true;
+      dom.conversionLive.textContent = "正在算";
+      $("#ladderBody").innerHTML = "";
+      renderChart([], null);
+      renderPathStatus("正在算", "马上出结果");
+      queueReferenceWorkspace();
+    }
+    return;
+  }
   const inputAnchor = context.input.anchor;
   const outputAnchor = context.output.anchor;
   const inputMove = inputValue ? percentMove(inputValue, inputAnchor) : null;
@@ -1037,6 +1304,30 @@ function renderPathPanel() {
   }
   const { underlyingMove, factor, productSymbol } = context;
   const days = state.pathDays;
+  if (!isPreciseMode()) {
+    const result = currentReferenceWorkspace();
+    if (!result?.paths) {
+      renderPathStatus("正在算", "马上出结果");
+      return;
+    }
+    dom.pathPanel.hidden = false;
+    dom.pathLead.innerHTML = `分 ${days} 天走完的结果：`;
+    const rows = [
+      ["一天到位", result.paths.single, "单日路径", "base"],
+      [`${days} 天匀速单边`, result.paths.smooth, "多日路径", "smooth"],
+      [`${days} 天来回震荡`, result.paths.drag, "震荡路径", "drag"],
+    ];
+    dom.pathRows.innerHTML = rows
+      .map(
+        ([label, value, detail, tone]) => `<div class="path-row" data-tone="${tone}">
+          <span class="path-label">${escapeHtml(label)}</span>
+          <strong class="path-value ${movementClass(value)}">${escapeHtml(formatPercent(value))}</strong>
+          <span class="path-detail">${escapeHtml(detail)}</span>
+        </div>`,
+      )
+      .join("");
+    return;
+  }
   const smooth = smoothPathOutcome({ underlyingMove, factor, days });
   const single = smoothPathOutcome({ underlyingMove, factor, days: 1 });
   const drag = roundTripDrag({ swing: PATH_SWING, factor, days });
@@ -1123,6 +1414,35 @@ function closestRowIndex(rows, target) {
 }
 
 function renderLadderAndChart() {
+  if (!isPreciseMode()) {
+    const rows = currentReferenceWorkspace()?.rows || [];
+    const target = finitePositive(dom.targetPriceInput.value);
+    const targetIndex = closestRowIndex(rows, target);
+    $("#ladderBody").innerHTML = rows
+      .map((row, index) => {
+        const flags = [
+          row.driverMove === 0 ? "anchor-row" : "",
+          index === targetIndex ? "target-row" : "",
+        ]
+          .filter(Boolean)
+          .join(" ");
+        const marker =
+          row.driverMove === 0
+            ? '<span class="row-tag">基准</span>'
+            : index === targetIndex
+              ? '<span class="row-tag target">目标</span>'
+              : "";
+        return `<tr class="${flags}">
+          <td><strong>${formatPrice(row.driverPrice)}</strong>${marker}</td>
+          <td class="${movementClass(row.driverMove)}">${formatPercent(row.driverMove)}</td>
+          <td><strong>${formatPrice(row.mappedPrice)}</strong></td>
+          <td class="${movementClass(row.mappedMove)}">${formatPercent(row.mappedMove)}</td>
+        </tr>`;
+      })
+      .join("");
+    renderChart(rows, target);
+    return;
+  }
   const rows = scenarioRows();
   const target = finitePositive(dom.targetPriceInput.value);
   const targetIndex = closestRowIndex(rows, target);
@@ -1292,7 +1612,9 @@ function renderChart(rows, target) {
 
   const targetInRange = target != null && target >= xMin && target <= xMax;
   if (targetInRange) {
-    const mapped = calculateTarget(target);
+    const mapped = isPreciseMode()
+      ? calculateTarget(target)
+      : currentReferenceWorkspace()?.conversionPrice;
     if (mapped != null && mapped >= yMin && mapped <= yMax) {
       const x = xScale(target);
       const y = yScale(mapped);
@@ -1431,6 +1753,17 @@ function resultSummary() {
   if (!context || !state.active) return "";
   const input = finitePositive(dom.targetPriceInput.value);
   if (!input) return "";
+  if (!isPreciseMode()) {
+    const result = currentReferenceWorkspace();
+    const convertedPrice = finitePositive(result?.conversionPrice);
+    const convertedMove = Number(result?.conversionMove);
+    if (convertedPrice == null || !Number.isFinite(convertedMove)) return "";
+    return [
+      `${context.input.symbol} ${formatPriceBare(input)} → ${context.output.symbol} ${formatPrice(convertedPrice)}`,
+      `对应变动 ${formatPercent(convertedMove)}`,
+      "LeverPath 换算结果，不构成投资建议",
+    ].join("\n");
+  }
   const output = calculateTarget(input);
   if (output == null) return "";
   return [
@@ -1456,6 +1789,7 @@ async function refreshSnapshot() {
     const previousStamp = state.marketSnapshot?.generated_at || null;
     const previousAnchor = state.active?.anchorDate || sampleAnchorDate();
     state.marketSnapshot = await fetchJson(SNAPSHOT_URL, { bustCache: true });
+    applySnapshotMode(state.marketSnapshot);
     if (identity)
       activateSymbol(identity.symbol, identity.product, { scroll: false, remember: false });
     updateDataStatus();
@@ -1525,6 +1859,9 @@ function buildRecognitionGroups(points) {
 
 function recognitionCell(entry, target) {
   if (!target) return { status: "unavailable", label: "—" };
+  if (!isPreciseMode()) {
+    return { status: "pending", label: "…" };
+  }
   if (!entry.sourceProduct) {
     const mapped = convertTarget({
       driverRole: "underlying",
@@ -1555,10 +1892,56 @@ function recognitionCell(entry, target) {
     : { status: "ok", label: formatPrice(mapped) };
 }
 
+async function requestReferenceRecognition(group, cells, requestId) {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), 12_000);
+  try {
+    const result = await postReferenceJson(
+      {
+        operation: "recognition",
+        cells: cells.map(({ entry, target }) => ({
+          underlyingSymbol: group.underlying.symbol,
+          sourceSymbol: entry.point.symbol,
+          targetProduct: target.product.symbol,
+          level: entry.point.level,
+        })),
+      },
+      { signal: controller.signal },
+    );
+    if (
+      isPreciseMode() ||
+      requestId !== state.recognitionRequestId ||
+      dom.recognitionSymbolSelect.value !== group.symbol
+    ) {
+      return;
+    }
+    cells.forEach((_, index) => {
+      const node = dom.recognitionBody.querySelector(`[data-reference-index="${index}"]`);
+      const price = finitePositive(result?.prices?.[index]);
+      if (!node) return;
+      node.dataset.status = price ? "ok" : "unavailable";
+      node.querySelector("strong").textContent = price ? formatPrice(price) : "—";
+    });
+    dom.recognitionGroupMeta.textContent = `识别到 ${group.points.length} 个点位 · ${group.products.length} 只杠杆`;
+    dom.recognitionSummary.textContent = `识别到 ${state.recognitionGroups.reduce((total, item) => total + item.points.length, 0)} 个点位 · 已算好`;
+  } catch {
+    if (requestId !== state.recognitionRequestId) return;
+    dom.recognitionBody.querySelectorAll("[data-reference-index]").forEach((node) => {
+      node.dataset.status = "unavailable";
+      node.querySelector("strong").textContent = "—";
+    });
+    dom.recognitionGroupMeta.textContent = "暂时算不出来";
+    dom.recognitionSummary.textContent = "识别完了 · 暂时算不出来";
+  } finally {
+    window.clearTimeout(timeout);
+  }
+}
+
 function renderRecognitionGroup(symbol = dom.recognitionSymbolSelect.value) {
   const group =
     state.recognitionGroups.find((item) => item.symbol === symbol) || state.recognitionGroups[0];
   if (!group) return;
+  const requestId = ++state.recognitionRequestId;
   dom.recognitionSymbolSelect.value = group.symbol;
   const tableWrap = dom.recognitionResults.querySelector(".table-wrap");
   if (tableWrap) {
@@ -1587,6 +1970,7 @@ function renderRecognitionGroup(symbol = dom.recognitionSymbolSelect.value) {
   }
 
   dom.recognitionHead.innerHTML = `<tr><th>识别到的点位</th>${group.products.map(({ product }) => `<th><strong>${escapeHtml(product.symbol)}</strong><small>${escapeHtml(factorLabel(product.factor))}</small></th>`).join("")}</tr>`;
+  const referenceCells = [];
   dom.recognitionBody.innerHTML = group.points
     .map((entry) => {
       const point = entry.point;
@@ -1596,13 +1980,21 @@ function renderRecognitionGroup(symbol = dom.recognitionSymbolSelect.value) {
       const cells = group.products
         .map((target) => {
           const cell = recognitionCell(entry, target);
-          return `<td data-status="${cell.status}"><strong>${escapeHtml(cell.label)}</strong></td>`;
+          const referenceIndex = isPreciseMode()
+            ? null
+            : referenceCells.push({ entry, target }) - 1;
+          return `<td data-status="${cell.status}"${referenceIndex == null ? "" : ` data-reference-index="${referenceIndex}"`}><strong>${escapeHtml(cell.label)}</strong></td>`;
         })
         .join("");
       return `<tr><td>${source}</td>${cells}</tr>`;
     })
     .join("");
-  dom.recognitionGroupMeta.textContent = `识别到 ${group.points.length} 个点位 · ${group.products.length} 只杠杆 · 收盘 ${group.anchorDate || "—"}`;
+  dom.recognitionGroupMeta.textContent = isPreciseMode()
+    ? `识别到 ${group.points.length} 个点位 · ${group.products.length} 只杠杆 · 收盘 ${group.anchorDate || "—"}`
+    : `识别到 ${group.points.length} 个点位 · ${group.products.length} 只杠杆 · 正在算`;
+  if (!isPreciseMode() && referenceCells.length) {
+    requestReferenceRecognition(group, referenceCells, requestId);
+  }
 }
 
 function runRecognition() {
@@ -1626,15 +2018,19 @@ function runRecognition() {
   // A number near a ticker still has to be a believable price for it. EPS,
   // share counts and index points that survive the text rules die here.
   const quotes = snapshotQuotes();
-  const points = rawPoints.filter((point) => {
-    const resolved = resolveCatalogSymbol(point.symbol, state.indexes);
-    const reference = resolved
-      ? quotes[
-          resolved.inputRole === "leveraged" ? resolved.product.symbol : resolved.underlying.symbol
-        ]
-      : null;
-    return plausibleLevel(point.level, reference?.close ?? reference?.anchor);
-  });
+  const points = isPreciseMode()
+    ? rawPoints.filter((point) => {
+        const resolved = resolveCatalogSymbol(point.symbol, state.indexes);
+        const reference = resolved
+          ? quotes[
+              resolved.inputRole === "leveraged"
+                ? resolved.product.symbol
+                : resolved.underlying.symbol
+            ]
+          : null;
+        return plausibleLevel(point.level, reference?.close ?? reference?.anchor);
+      })
+    : rawPoints;
   state.recognitionIgnored = rawPoints.length - points.length;
   if (!points.length) {
     state.recognitionGroups = [];
@@ -1662,9 +2058,11 @@ function runRecognition() {
     : state.recognitionGroups[0]?.symbol;
   renderRecognitionGroup(selectedSymbol);
   dom.recognitionResults.hidden = false;
-  dom.recognitionSummary.textContent = state.recognitionIgnored
-    ? `识别到 ${points.length} 个点位 · ${state.recognitionGroups.length} 只正股 · 忽略了 ${state.recognitionIgnored} 个不像价格的数字`
-    : `识别到 ${points.length} 个点位 · ${state.recognitionGroups.length} 只正股`;
+  dom.recognitionSummary.textContent = !isPreciseMode()
+    ? `识别到 ${points.length} 个点位 · 正在算`
+    : state.recognitionIgnored
+      ? `识别到 ${points.length} 个点位 · ${state.recognitionGroups.length} 只正股 · 忽略了 ${state.recognitionIgnored} 个不像价格的数字`
+      : `识别到 ${points.length} 个点位 · ${state.recognitionGroups.length} 只正股`;
 }
 
 function initializeRecognitionAliases() {
@@ -1805,12 +2203,14 @@ $("#rangeButtons").addEventListener("click", (event) => {
     item.classList.toggle("active", active);
     item.setAttribute("aria-pressed", String(active));
   });
-  renderLadderAndChart();
+  if (isPreciseMode()) renderLadderAndChart();
+  else updateConversionOutputs();
 });
 
 $("#stepSelect").addEventListener("change", (event) => {
   state.step = Number(event.target.value);
-  renderLadderAndChart();
+  if (isPreciseMode()) renderLadderAndChart();
+  else updateConversionOutputs();
 });
 
 dom.pathDays.addEventListener("click", (event) => {
@@ -1822,7 +2222,8 @@ dom.pathDays.addEventListener("click", (event) => {
     item.classList.toggle("active", active);
     item.setAttribute("aria-pressed", String(active));
   });
-  renderPathPanel();
+  if (isPreciseMode()) renderPathPanel();
+  else updateConversionOutputs();
 });
 
 dom.refreshButton.addEventListener("click", refreshSnapshot);
@@ -1903,6 +2304,105 @@ dom.recognitionText.addEventListener("keydown", (event) => {
 });
 window.addEventListener("resize", hideChartTooltip);
 
+function setPublicKeyError(message = "") {
+  if (!dom.publicKeyError) return;
+  dom.publicKeyError.textContent = message;
+  dom.publicKeyError.hidden = !message;
+}
+
+function setPublicKeyOpen(open) {
+  if (!dom.publicKeyTrigger || !dom.publicKeyPopover) return;
+  dom.publicKeyTrigger.setAttribute("aria-expanded", String(open));
+  dom.publicKeyPopover.hidden = !open;
+  if (open && !state.precisionToken) {
+    window.setTimeout(() => dom.publicPrecisionKey?.focus(), 0);
+  }
+  if (!open) {
+    if (dom.publicPrecisionKey) dom.publicPrecisionKey.value = "";
+    setPublicKeyError();
+  }
+}
+
+function renderPublicKeyState() {
+  if (!dom.publicKeyPanel) return;
+  dom.publicKeyPanel.hidden = !USES_REMOTE_API;
+  if (!USES_REMOTE_API) return;
+  const unlocked = Boolean(state.precisionToken) && isPreciseMode();
+  dom.publicKeyPanel.classList.toggle("unlocked", unlocked);
+  if (dom.publicKeyForm) dom.publicKeyForm.hidden = unlocked;
+  if (dom.publicKeyStatus) dom.publicKeyStatus.hidden = !unlocked;
+  if (dom.publicKeyTrigger) {
+    dom.publicKeyTrigger.setAttribute("aria-label", unlocked ? "访问设置（已启用）" : "访问设置");
+    dom.publicKeyTrigger.removeAttribute("title");
+  }
+}
+
+function initializePublicKeyPanel() {
+  renderPublicKeyState();
+  if (!USES_REMOTE_API || !dom.publicKeyPanel) return;
+
+  dom.publicKeyTrigger.addEventListener("click", () => {
+    setPublicKeyOpen(dom.publicKeyPopover.hidden);
+  });
+  dom.publicKeyForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const key = dom.publicPrecisionKey.value;
+    if (!key || dom.publicKeySubmit.disabled) return;
+    dom.publicKeySubmit.disabled = true;
+    setPublicKeyError();
+    try {
+      const response = await fetch(KEY_URL, {
+        method: "POST",
+        headers: { Accept: "application/json", "Content-Type": "application/json" },
+        cache: "no-store",
+        body: JSON.stringify({ key }),
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok || !payload?.access_token) {
+        if (response.status === 401) throw new Error("key 不正确");
+        if (response.status === 429) throw new Error("尝试太频繁，请一分钟后再试");
+        throw new Error("暂时无法验证");
+      }
+      savePrecisionToken(payload.access_token);
+      dom.publicPrecisionKey.value = "";
+      await refreshSnapshot();
+      if (!isPreciseMode()) throw new Error("暂时无法启用精准模式");
+      renderPublicKeyState();
+      showToast("精准模式已解锁。");
+    } catch (error) {
+      clearPrecisionToken();
+      setPublicKeyError(error.message || "暂时无法验证");
+    } finally {
+      dom.publicKeySubmit.disabled = false;
+    }
+  });
+  dom.publicKeyLock.addEventListener("click", async () => {
+    dom.publicKeyLock.disabled = true;
+    setPublicKeyError();
+    try {
+      await fetch(KEY_URL, { method: "DELETE", cache: "no-store" });
+    } catch {
+      // Bearer sessions are stateless; deleting the local copy is the actual logout.
+    }
+    clearPrecisionToken();
+    await refreshSnapshot();
+    dom.publicKeyLock.disabled = false;
+    setPublicKeyOpen(false);
+    showToast("已退出精准模式。");
+  });
+  document.addEventListener("pointerdown", (event) => {
+    if (!dom.publicKeyPopover.hidden && !dom.publicKeyPanel.contains(event.target)) {
+      setPublicKeyOpen(false);
+    }
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !dom.publicKeyPopover.hidden) {
+      setPublicKeyOpen(false);
+      dom.publicKeyTrigger.focus();
+    }
+  });
+}
+
 initializeRecognitionAliases();
 
 async function boot() {
@@ -1918,12 +2418,13 @@ async function boot() {
     state.groups = groupCatalog(rawCatalog);
     state.indexes = buildCatalogIndexes(state.groups);
     state.marketSnapshot = marketSnapshot;
+    applySnapshotMode(marketSnapshot);
     buildSearchIndex();
     renderExampleRail();
     renderRecentRail();
     updateDataStatus();
     dom.runRecognitionButton.disabled = false;
-    dom.recognitionSummary.textContent = "等你贴文字";
+    dom.recognitionSummary.textContent = isPreciseMode() ? "等你贴文字" : "普通模式 · 等你贴文字";
 
     const params = new URL(window.location.href).searchParams;
     const symbol = normalizeSymbol(params.get("symbol"));
